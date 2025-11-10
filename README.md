@@ -18,7 +18,7 @@ The previous version (V2) was prone to inefficiency under high trading volumes, 
 
 With V3, we achieve:
 
-1.  **Greater Capital Efficiency:** By routing trades through a V3 router, our contract can benefit from concentrated liquidity. This means we require less total capital to generate the same market impact and maintain stable exchange prices for users.
+1.  **Greater Capital Efficiency:** By routing trades through a V2 router, our contract can benefit from concentrated liquidity. This means we require less total capital to generate the same market impact and maintain stable exchange prices for users.
 2.  **Superior Pricing for Users:** Transactions executed via the V3 architecture generally find optimal swap paths, ensuring the user receives the best possible rate with minimized slippage.
 3.  **Standardization:** We are integrating with industry-standard contracts, making the protocol more compatible, trustworthy, and auditable.
 
