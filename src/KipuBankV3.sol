@@ -4,7 +4,7 @@ pragma solidity >=0.8.20 <0.9.0;
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
-import {IUniswapV2Router02} from "v2-periphery/interfaces/IUniswapV2Router02.sol"; // Importación oficial de Uniswap
+import {IUniswapV2Router02} from "v2-periphery/interfaces/IUniswapV2Router02.sol";
 
 /**
  * @title KipuBankV3
