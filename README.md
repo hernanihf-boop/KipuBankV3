@@ -47,5 +47,4 @@ forge script script/DeployKipuBankV3.s.sol:DeployKipuBankV3 \
   --verify \
   --etherscan-api-key $ETHERSCAN_KEY \
   --chain-id 11155111 \
-  --private-key $PRIVATE_KEY \
-  --sender 0x777f3e98427fea4197edaace132e1ad4507e9099
+  --private-key $PRIVATE_KEY
