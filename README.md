@@ -42,10 +42,10 @@ Execute the following command from your project root. The script `script/DeployK
 
 ```bash
 forge script script/DeployKipuBankV3.s.sol:DeployKipuBankV3 \
-  --rpc-url $SEPOLIA_RPC_URL \
-  --private-key $PRIVATE_KEY \
+  --rpc-url  $SEPOLIA_RPC_URL \
   --broadcast \
   --verify \
-  --chain-id 11155111 \
   --etherscan-api-key $ETHERSCAN_KEY \
-  -vvvvv
+  --chain-id 11155111 \
+  --private-key $PRIVATE_KEY \
+  --sender 0x777f3e98427fea4197edaace132e1ad4507e9099
