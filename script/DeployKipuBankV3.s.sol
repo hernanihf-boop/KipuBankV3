@@ -7,7 +7,7 @@ import {KipuBankV3} from "../src/KipuBankV3.sol";
 
 contract DeployKipuBankV3 is Script {
         
-    address internal immutable UNISWAP_ROUTER = 0xeE567Fe1712Faf6149d80dA1E6934E354124CfE3; 
+    address internal immutable UNISWAP_ROUTER = 0x7a250d5630B4cF539739dF2C5dAcb4c659F2488D; 
     address internal immutable USDC_ADDRESS = 0x96152E6180E085FA57c7708e18AF8F05e37B479D; 
 
     uint256 internal constant BANK_CAP_USD = 1000;
