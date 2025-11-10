@@ -1,9 +1,6 @@
 // SPDX-License-Identifier: MIT
 pragma solidity >=0.8.20 <0.9.0;
 
-// *******************************************************************
-// 1. IMPORTACIONES
-// *******************************************************************
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
@@ -68,7 +65,6 @@ contract KipuBankV3 is ReentrancyGuard, Ownable {
      */
     mapping(address => uint256) private balances;
 
-    // Mantenemos los contadores para cumplir con la V2, aunque solo se usen con USDC.
     mapping(address => uint256) private totalDeposits;
     mapping(address => uint256) private totalWithdrawals;
 
@@ -116,11 +112,7 @@ contract KipuBankV3 is ReentrancyGuard, Ownable {
 
         UNISWAP_ROUTER = IUniswapV2Router02(_router);
         USDC_ADDRESS = _usdc;
-        
-        // Inicializa WETH (necesario para el ruteo)
         WETH_ADDRESS = UNISWAP_ROUTER.WETH();
-        
-        // BANK_CAP_USDC se convierte a 6 decimales, asumiendo que _bankCapUsd viene en unidades.
         BANK_CAP_USDC = _bankCapUsd * 1e6; 
     }
 
@@ -148,29 +140,22 @@ contract KipuBankV3 is ReentrancyGuard, Ownable {
 
         if (amountIn == 0) revert ZeroAmount();
         
-        // 1. Swap ETH -> USDC
-        // Path: ETH (via WETH) -> USDC
         address[] memory path = new address[](2);
         path[0] = WETH_ADDRESS;
         path[1] = USDC_ADDRESS;
 
-        // Necesitamos saber cuánto USDC vamos a recibir para el chequeo del Cap
-        // En este caso sí necesitamos usdcBefore porque swapExactETHForTokens NO devuelve la cantidad recibida.
         uint256 usdcBefore = IERC20(USDC_ADDRESS).balanceOf(address(this));
         
-        // La transacción de swap envía ETH y recibe USDC directamente.
         try UNISWAP_ROUTER.swapExactETHForTokens{value: amountIn}(
-            0, // amountOutMin: 0 for simplicity, tests should use a higher amountOutMin
+            0,
             path,
-            address(this), // Recibe el contrato
+            address(this),
             block.timestamp
         ) {
-            // Check if the bank has enough capacity.
             uint256 usdcReceived = IERC20(USDC_ADDRESS).balanceOf(address(this)) - usdcBefore;
             
             if (usdcReceived == 0) revert ZeroUsdcReceived();
 
-            // Optimización: Cacheo para doble lectura de estado.
             uint256 currentUsdc = currentBankValueUsdc;
             uint256 maxCap = BANK_CAP_USDC;
 
@@ -178,16 +163,13 @@ contract KipuBankV3 is ReentrancyGuard, Ownable {
                 revert BankCapExceeded(currentUsdc, usdcReceived, maxCap);
             }
             
-            // 2. Effects
             balances[user] += usdcReceived;
             currentBankValueUsdc = currentUsdc + usdcReceived;
-            totalDeposits[USDC_ADDRESS]++; // Cuenta el depósito de ETH como un depósito de USDC
+            totalDeposits[USDC_ADDRESS]++;
 
-            // 3. Event
             emit DepositSwapped(user, NATIVE_TOKEN_ADDRESS, amountIn, usdcReceived);
 
         } catch {
-            // Reembolsa el ETH si el swap falla.
             (bool sent, ) = payable(user).call{value: amountIn}("");
             if (!sent) revert TransferFailed(NATIVE_TOKEN_ADDRESS);
             revert UniswapSwapFailed();
@@ -208,28 +190,19 @@ contract KipuBankV3 is ReentrancyGuard, Ownable {
 
         address user = msg.sender;
         
-        // 3. DEFINICIÓN DEL TOKEN COMO IERC20
         IERC20 tokenIn = IERC20(_token);
         
-        // 1. Transferencia y Aprobación
-        // Usamos la función estándar de IERC20: transferFrom
         bool successTransferFrom = tokenIn.transferFrom(user, address(this), _amount);
         if (!successTransferFrom) revert TransferFailed(_token);
         
-        // Aprobación (Approve)
-        // Usamos la función estándar de IERC20
         bool successApprove = tokenIn.approve(address(UNISWAP_ROUTER), _amount);
         if (!successApprove) revert TransferFailed(_token);
 
-
-        // 2. Swap Token -> USDC
         address[] memory path;
         
         if (_token == USDC_ADDRESS) {
-            // Si el token es USDC, no se necesita swap.
             path = new address[](0); 
         } else {
-            // Path: Token In -> USDC
             path = new address[](2);
             path[0] = _token;
             path[1] = USDC_ADDRESS;
@@ -240,34 +213,23 @@ contract KipuBankV3 is ReentrancyGuard, Ownable {
         if (_token == USDC_ADDRESS) {
             usdcReceived = _amount;
         } else {
-            // NOTA: Se eliminó la línea 'uint256 usdcBefore = ...' 
-            // porque 'swapExactTokensForTokens' devuelve directamente el monto recibido.
-
-            // Swap
             try UNISWAP_ROUTER.swapExactTokensForTokens(
                 _amount,
-                0, // amountOutMin: 0 for simplicity
+                0,
                 path,
                 address(this),
                 block.timestamp
             ) returns (uint[] memory amounts) {
-                // El resultado del try (amounts[amounts.length - 1]) es el USDC recibido.
                 usdcReceived = amounts[amounts.length - 1]; 
                 if (usdcReceived == 0) revert ZeroUsdcReceived();
                 
-                // Desaprobar para seguir buenas prácticas
-                // Usamos la función estándar de IERC20
                 bool successApproveZero = tokenIn.approve(address(UNISWAP_ROUTER), 0);
                 if (!successApproveZero) revert TransferFailed(_token);
-                
             } catch {
-                // Si el swap falla, queda el token IN en el contrato. No se revierte al usuario.
                 revert UniswapSwapFailed();
             }
         }
 
-        // 3. Chequeo del Bank Cap
-        // Optimización: Cacheo para doble lectura de estado.
         uint256 currentUsdc = currentBankValueUsdc;
         uint256 maxCap = BANK_CAP_USDC;
         
@@ -275,12 +237,10 @@ contract KipuBankV3 is ReentrancyGuard, Ownable {
             revert BankCapExceeded(currentUsdc, usdcReceived, maxCap);
         }
 
-        // 4. Effects
         balances[user] += usdcReceived;
         currentBankValueUsdc = currentUsdc + usdcReceived;
-        totalDeposits[USDC_ADDRESS]++; // Solo contamos depósitos en el token de balance
+        totalDeposits[USDC_ADDRESS]++;
         
-        // 5. Event
         emit DepositSwapped(user, _token, _amount, usdcReceived);
     }
 
@@ -295,19 +255,15 @@ contract KipuBankV3 is ReentrancyGuard, Ownable {
     function withdraw(uint256 _usdcAmount) external nonReentrant {
         if (_usdcAmount == 0) revert ZeroAmount();
 
-        // 1. Chequeos (Checks)
         if (_usdcAmount > MAX_WITHDRAWAL_USDC) {
             revert WithdrawalLimitExceeded(MAX_WITHDRAWAL_USDC, _usdcAmount);
         }
 
-        // Optimización: Cacheo de balance
         uint256 userUsdcBalance = balances[msg.sender];
         if (_usdcAmount > userUsdcBalance) {
             revert InsufficientFunds(userUsdcBalance, _usdcAmount);
         }
 
-        // 2. Efectos (Effects)
-        // Optimización: Cacheo de valor total
         uint256 currentUsdc = currentBankValueUsdc;
         
         unchecked {
@@ -317,12 +273,9 @@ contract KipuBankV3 is ReentrancyGuard, Ownable {
 
         totalWithdrawals[USDC_ADDRESS]++;
 
-        // 3. Interacción (Interaction)
-        // Usamos la función estándar 'transfer' de IERC20.
         bool successTransfer = IERC20(USDC_ADDRESS).transfer(msg.sender, _usdcAmount);
         if (!successTransfer) revert TransferFailed(USDC_ADDRESS);
 
-        // 4. Event
         emit WithdrawalSuccessful(msg.sender, _usdcAmount);
     }
     
