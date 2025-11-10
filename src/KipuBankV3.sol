@@ -61,7 +61,6 @@ contract KipuBankV3 is ReentrancyGuard, Ownable {
 
     /**
      * @dev Mapping: userAddress => balance (in USDC, 6 decimals).
-     * All tokens are swapped to USDC, so we simplify the balance tracking.
      */
     mapping(address => uint256) private balances;
 
@@ -88,6 +87,7 @@ contract KipuBankV3 is ReentrancyGuard, Ownable {
     error UniswapSwapFailed();
     error ZeroUsdcReceived();
     error InvalidRouterAddress();
+    error InvalidWethAddress();
     error InvalidUsdcAddress();
 
     // ====================================================================
@@ -97,22 +97,25 @@ contract KipuBankV3 is ReentrancyGuard, Ownable {
     /**
     * @dev Constructor that initializes the contract.
     * @param _router Address of the Uniswap V2 Router.
+    * @param _weth_address Address of the WETH token.
     * @param _usdc Address of the USDC token (assumed 6 decimals).
     * @param _bankCapUsd The total USDC limit the contract can handle/accept (in USD units).
-    * @notice Sets the contract owner, the Uniswap Router, USDC address, and the global deposit limit.
+    * @notice Sets the contract owner, the Uniswap Router, WETH address, USDC address, and the global deposit limit.
     */
     constructor(
-        address _router, 
+        address _router,
+        address _weth_address, 
         address _usdc, 
         uint256 _bankCapUsd
     ) Ownable(msg.sender) {
         if (_router == address(0)) revert InvalidRouterAddress();
+        if (_weth_address == address(0)) revert InvalidWethAddress();
         if (_usdc == address(0) || _usdc == NATIVE_TOKEN_ADDRESS) revert InvalidUsdcAddress();
         if (_bankCapUsd == 0) revert InvalidBankCapValue();
 
         UNISWAP_ROUTER = IUniswapV2Router02(_router);
         USDC_ADDRESS = _usdc;
-        WETH_ADDRESS = UNISWAP_ROUTER.WETH();
+        WETH_ADDRESS = _weth_address;
         BANK_CAP_USDC = _bankCapUsd * 1e6; 
     }
 
@@ -168,7 +171,6 @@ contract KipuBankV3 is ReentrancyGuard, Ownable {
             totalDeposits[USDC_ADDRESS]++;
 
             emit DepositSwapped(user, NATIVE_TOKEN_ADDRESS, amountIn, usdcReceived);
-
         } catch {
             (bool sent, ) = payable(user).call{value: amountIn}("");
             if (!sent) revert TransferFailed(NATIVE_TOKEN_ADDRESS);
@@ -186,10 +188,9 @@ contract KipuBankV3 is ReentrancyGuard, Ownable {
         uint256 _amount
     ) external nonReentrant {
         if (_amount == 0) revert ZeroAmount();
-        if (_token == NATIVE_TOKEN_ADDRESS) revert TransferFailed(NATIVE_TOKEN_ADDRESS); // Usar depositNativeToken
+        if (_token == NATIVE_TOKEN_ADDRESS) revert TransferFailed(NATIVE_TOKEN_ADDRESS);
 
         address user = msg.sender;
-        
         IERC20 tokenIn = IERC20(_token);
         
         bool successTransferFrom = tokenIn.transferFrom(user, address(this), _amount);
@@ -225,6 +226,7 @@ contract KipuBankV3 is ReentrancyGuard, Ownable {
                 
                 bool successApproveZero = tokenIn.approve(address(UNISWAP_ROUTER), 0);
                 if (!successApproveZero) revert TransferFailed(_token);
+                
             } catch {
                 revert UniswapSwapFailed();
             }
