@@ -232,6 +232,8 @@ contract KipuBankV3Test is Test {
     }
     
     function test_DepositNativeToken_Revert_CapExceeded() public {
+        uint256 initialBankBalanceUsdc = usdc.balanceOf(address(bank));
+        
         vm.prank(user1);
         // 6 ETH = 12,000 USDC. Cap is 10,000 USDC.
         uint256 ethAmount = 6 ether; 
@@ -240,8 +242,8 @@ contract KipuBankV3Test is Test {
         vm.expectRevert(
             abi.encodeWithSelector(
                 KipuBankV3.BankCapExceeded.selector, 
-                0, 
-                expectedUsdc, 
+                initialBankBalanceUsdc + expectedUsdc, // Nuevo balance total del contrato
+                expectedUsdc, // Monto recibido en este swap
                 BANK_CAP_USDC_DEC
             )
         );
