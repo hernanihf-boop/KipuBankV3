@@ -11,7 +11,6 @@ import {IUniswapV2Router02} from "v2-periphery/interfaces/IUniswapV2Router02.sol
  * @author Hernán Iannello
  * @notice Smart contract which allows users to deposit ETH or any ERC20 token 
  * (supported by Uniswap V2) and automatically swaps the deposit into USDC. 
- * Balances are tracked internally in USDC.
  */
 contract KipuBankV3 is ReentrancyGuard, Ownable {
     // ====================================================================
@@ -29,7 +28,7 @@ contract KipuBankV3 is ReentrancyGuard, Ownable {
     address public immutable WETH_ADDRESS;
 
     /**
-     * @dev Address of the USDC stablecoin. All internal balances are denominated in USDC (6 decimals).
+     * @dev Address of the USDC stablecoin (6 decimals).
      */
     address public immutable USDC_ADDRESS;
 
@@ -55,17 +54,19 @@ contract KipuBankV3 is ReentrancyGuard, Ownable {
     // ====================================================================
 
     /**
-     * @dev Tracks the current total value of all reserves in USDC (6 decimals).
-     */
-    uint256 private currentBankValueUsdc;
-
-    /**
      * @dev Mapping: userAddress => balance (in USDC, 6 decimals).
      */
     mapping(address => uint256) private balances;
 
-    mapping(address => uint256) private totalDeposits;
-    mapping(address => uint256) private totalWithdrawals;
+    /**
+     * @dev Total deposits counter.
+     */
+    uint256 private totalDeposits;
+
+    /**
+     * @dev Total withdeawal counter.
+     */
+    uint256 private totalWithdrawals;
 
     // ====================================================================
     // EVENTS
@@ -79,7 +80,7 @@ contract KipuBankV3 is ReentrancyGuard, Ownable {
     // ====================================================================
 
     error ZeroAmount();
-    error BankCapExceeded(uint256 currentUsdcValue, uint256 requestedUsdcAmount, uint256 bankCap);
+    error BankCapExceeded(uint256 currentTotalUsdc, uint256 requestedUsdcAmount, uint256 bankCap); 
     error InvalidBankCapValue();
     error InsufficientFunds(uint256 available, uint256 requested);
     error WithdrawalLimitExceeded(uint256 limit, uint256 requested);
@@ -97,25 +98,25 @@ contract KipuBankV3 is ReentrancyGuard, Ownable {
     /**
     * @dev Constructor that initializes the contract.
     * @param _router Address of the Uniswap V2 Router.
-    * @param _weth_address Address of the WETH token.
-    * @param _usdc Address of the USDC token (assumed 6 decimals).
+    * @param _wethAddress Address of the WETH token.
+    * @param _usdcAddress Address of the USDC token (assumed 6 decimals).
     * @param _bankCapUsd The total USDC limit the contract can handle/accept (in USD units).
     * @notice Sets the contract owner, the Uniswap Router, WETH address, USDC address, and the global deposit limit.
     */
     constructor(
         address _router,
-        address _weth_address, 
-        address _usdc, 
+        address _wethAddress, 
+        address _usdcAddress, 
         uint256 _bankCapUsd
     ) Ownable(msg.sender) {
         if (_router == address(0)) revert InvalidRouterAddress();
-        if (_weth_address == address(0)) revert InvalidWethAddress();
-        if (_usdc == address(0) || _usdc == NATIVE_TOKEN_ADDRESS) revert InvalidUsdcAddress();
+        if (_wethAddress == address(0)) revert InvalidWethAddress();
+        if (_usdcAddress == address(0) || _usdcAddress == NATIVE_TOKEN_ADDRESS) revert InvalidUsdcAddress();
         if (_bankCapUsd == 0) revert InvalidBankCapValue();
 
         UNISWAP_ROUTER = IUniswapV2Router02(_router);
-        USDC_ADDRESS = _usdc;
-        WETH_ADDRESS = _weth_address;
+        USDC_ADDRESS = _usdcAddress;
+        WETH_ADDRESS = _wethAddress;
         BANK_CAP_USDC = _bankCapUsd * 1e6; 
     }
 
@@ -135,8 +136,10 @@ contract KipuBankV3 is ReentrancyGuard, Ownable {
     // ====================================================================
 
     /**
-    * @notice Allows any user to deposit the native token (ETH) and automatically swaps it to USDC.
-    */
+     * @notice Deposits native ETH and swaps it to USDC via Uniswap V2.
+     * @dev The ETH amount is taken from `msg.value`. Reverts if no ETH is sent.
+     * On failure, the ETH is refunded to the caller.
+     */
     function depositNativeToken() public payable nonReentrant {
         uint256 amountIn = msg.value;
         address user = msg.sender;
@@ -155,20 +158,18 @@ contract KipuBankV3 is ReentrancyGuard, Ownable {
             address(this),
             block.timestamp
         ) {
-            uint256 usdcReceived = IERC20(USDC_ADDRESS).balanceOf(address(this)) - usdcBefore;
+            uint256 usdcAfter = IERC20(USDC_ADDRESS).balanceOf(address(this));
+            uint256 usdcReceived = usdcAfter - usdcBefore;
             
             if (usdcReceived == 0) revert ZeroUsdcReceived();
 
-            uint256 currentUsdc = currentBankValueUsdc;
             uint256 maxCap = BANK_CAP_USDC;
-
-            if (currentUsdc + usdcReceived > maxCap) {
-                revert BankCapExceeded(currentUsdc, usdcReceived, maxCap);
+            if (usdcAfter > maxCap) {
+                revert BankCapExceeded(usdcAfter, usdcReceived, maxCap);
             }
             
             balances[user] += usdcReceived;
-            currentBankValueUsdc = currentUsdc + usdcReceived;
-            totalDeposits[USDC_ADDRESS]++;
+            totalDeposits++;
 
             emit DepositSwapped(user, NATIVE_TOKEN_ADDRESS, amountIn, usdcReceived);
         } catch {
@@ -192,36 +193,33 @@ contract KipuBankV3 is ReentrancyGuard, Ownable {
 
         address user = msg.sender;
         IERC20 tokenIn = IERC20(_token);
-        
+        uint256 usdcReceived;
+
         bool successTransferFrom = tokenIn.transferFrom(user, address(this), _amount);
         if (!successTransferFrom) revert TransferFailed(_token);
         
-        bool successApprove = tokenIn.approve(address(UNISWAP_ROUTER), _amount);
-        if (!successApprove) revert TransferFailed(_token);
-
-        address[] memory path;
-        
-        if (_token == USDC_ADDRESS) {
-            path = new address[](0); 
-        } else {
-            path = new address[](2);
-            path[0] = _token;
-            path[1] = USDC_ADDRESS;
-        }
-
-        uint256 usdcReceived;
-        
         if (_token == USDC_ADDRESS) {
             usdcReceived = _amount;
-        } else {
+        } else {            
+            bool successApprove = tokenIn.approve(address(UNISWAP_ROUTER), _amount);
+            if (!successApprove) revert TransferFailed(_token);
+
+            address[] memory path = new address[](2);
+            path[0] = _token;
+            path[1] = USDC_ADDRESS;
+
+            uint256 usdcBeforeSwap = IERC20(USDC_ADDRESS).balanceOf(address(this));
+            
             try UNISWAP_ROUTER.swapExactTokensForTokens(
                 _amount,
                 0,
                 path,
                 address(this),
                 block.timestamp
-            ) returns (uint[] memory amounts) {
-                usdcReceived = amounts[amounts.length - 1]; 
+            ) returns (uint[] memory) {
+                uint256 usdcAfterSwap = IERC20(USDC_ADDRESS).balanceOf(address(this));
+                usdcReceived = usdcAfterSwap - usdcBeforeSwap;
+                
                 if (usdcReceived == 0) revert ZeroUsdcReceived();
                 
                 bool successApproveZero = tokenIn.approve(address(UNISWAP_ROUTER), 0);
@@ -231,17 +229,15 @@ contract KipuBankV3 is ReentrancyGuard, Ownable {
                 revert UniswapSwapFailed();
             }
         }
-
-        uint256 currentUsdc = currentBankValueUsdc;
-        uint256 maxCap = BANK_CAP_USDC;
         
-        if (currentUsdc + usdcReceived > maxCap) {
-            revert BankCapExceeded(currentUsdc, usdcReceived, maxCap);
+        uint256 currentTotalUsdc = IERC20(USDC_ADDRESS).balanceOf(address(this));
+        uint256 maxCap = BANK_CAP_USDC;
+        if (currentTotalUsdc > maxCap) {
+            revert BankCapExceeded(currentTotalUsdc, usdcReceived, maxCap);
         }
 
-        balances[user] += usdcReceived;
-        currentBankValueUsdc = currentUsdc + usdcReceived;
-        totalDeposits[USDC_ADDRESS]++;
+        balances[user] += usdcReceived;        
+        totalDeposits++;
         
         emit DepositSwapped(user, _token, _amount, usdcReceived);
     }
@@ -251,9 +247,10 @@ contract KipuBankV3 is ReentrancyGuard, Ownable {
     // ====================================================================
 
     /**
-    * @notice Allows the user to withdraw their USDC balance.
-    * @param _usdcAmount Amount of USDC (in 6 decimals) the user wishes to withdraw.
-    */
+     * @notice Withdraws USDC from the user's balance.
+     * @dev Reverts if the amount exceeds MAX_WITHDRAWAL_USDC or the user's balance.
+     * @param _usdcAmount The amount to withdraw, in USDC units.
+     */
     function withdraw(uint256 _usdcAmount) external nonReentrant {
         if (_usdcAmount == 0) revert ZeroAmount();
 
@@ -266,61 +263,59 @@ contract KipuBankV3 is ReentrancyGuard, Ownable {
             revert InsufficientFunds(userUsdcBalance, _usdcAmount);
         }
 
-        uint256 currentUsdc = currentBankValueUsdc;
-        
         unchecked {
             balances[msg.sender] = userUsdcBalance - _usdcAmount;
-            currentBankValueUsdc = currentUsdc - _usdcAmount;
         }
-
-        totalWithdrawals[USDC_ADDRESS]++;
 
         bool successTransfer = IERC20(USDC_ADDRESS).transfer(msg.sender, _usdcAmount);
         if (!successTransfer) revert TransferFailed(USDC_ADDRESS);
+        totalWithdrawals++;
 
         emit WithdrawalSuccessful(msg.sender, _usdcAmount);
     }
     
     // ====================================================================
-    // VIEW & UTILITY FUNCTIONS (Preserving V2 Functionality)
+    // VIEW & UTILITY FUNCTIONS
     // ====================================================================
 
     /**
-     * @notice Retrieves the total value of the reserves in USDC (6 decimals).
-     * @return The total value of the bank vault/reserves in USDC.
+     * @notice Returns the total USDC held by the contract (6 decimals), including all reserves.
+     * @dev Restricted to the contract owner. Includes both user deposits and any excess funds.
+     * @return The total USDC balance of the contract.
      */
     function getTotalBankValueUsdc() external view onlyOwner returns (uint256) {
-        return currentBankValueUsdc; 
+        return IERC20(USDC_ADDRESS).balanceOf(address(this)); 
     }
 
     /**
-    * @notice Returns the user balance in USDC (6 decimals).
-    * @return The user balance.
-    */
+     * @notice Returns the caller's USDC balance in the contract (6 decimals).
+     * @return The user's balance in USDC.
+     */
     function getUsdcBalance() external view returns (uint256) {
         return balances[msg.sender];
     }
     
     /**
-    * @notice Returns the total number of deposits that have been made to the USDC balance.
-    * @return The total deposit count.
-    */
+     * @notice Returns the total number of successful deposit operations.
+     * @return totalDeposits The cumulative count of deposit transactions.
+     */
     function getTotalDepositsCount() public view returns (uint256) {
-        return totalDeposits[USDC_ADDRESS];
+        return totalDeposits;
     }
 
     /**
-    * @notice Returns the total number of withdrawals that have been made from the USDC balance.
-    * @return The total withdrawal count.
-    */
+     * @notice Returns the total number of successful withdrawal operations.
+     * @return totalWithdrawals The cumulative count of withdrawal transactions.
+     */
     function getTotalWithdrawalsCount() public view returns (uint256) {
-        return totalWithdrawals[USDC_ADDRESS];
+        return totalWithdrawals;
     }
 
     /**
-    * @notice Returns the contract's bank capacity (in 6 decimals).
-    * @return The contract's bank capacity.
-    */
+     * @notice Returns the maximum USDC capacity the contract can hold (6 decimals, same as USDC).
+     * @dev This value is set at deployment and cannot be modified.
+     * @return The bank's capacity in USDC (e.g., 10_000_000 = 10,000 USDC).
+     */
     function getBankCap() public view returns (uint256) {
         return BANK_CAP_USDC;
     }
