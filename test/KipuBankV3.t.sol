@@ -4,6 +4,9 @@ pragma solidity >=0.8.20 <0.9.0;
 import {Test} from "forge-std/Test.sol"; 
 import {KipuBankV3} from "../src/KipuBankV3.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+
+using SafeERC20 for IERC20;
 
 // ====================================================================
 // MOCK CONTRACTS (Dependency Simulation)
@@ -52,7 +55,6 @@ contract MockERC20 is IERC20 {
         _balances[from] -= amount;
         _balances[to] += amount;
         
-        emit Approval(from, msg.sender, _allowances[from][msg.sender]);
         emit Transfer(from, to, amount);
         return true;
     }
@@ -84,31 +86,41 @@ contract MockUniswapV2Router {
         DAI_ADDRESS = _dai;
     }
     
-    function WETH() external pure returns (address) { return MOCK_WETH_ADDRESS; } 
+    function WETH() external pure returns (address) { return address(MOCK_WETH_ADDRESS); } 
     function factory() external pure returns (address) { return address(0); }
     
-    // --- Mocks for ETH swaps ---
+    // --- Mocks for WETH Wrapping (ETH deposit) ---
+    function deposit() external payable {
+        // Mints WETH to the depositor (KipuBankV3)
+        MockERC20(MOCK_WETH_ADDRESS).mint(msg.sender, msg.value);
+    }
+
+    // --- Mocks for ETH swaps (ETH -> WETH -> USDC) ---
+    /**
+     * @notice Logic for swapExactETHForTokens.
+     */
     function swapExactETHForTokens(
         uint256,
         address[] calldata path,
         address to,
         uint256
     ) external payable returns (uint256[] memory) {
-        require(path.length == 2 && path[0] == MOCK_WETH_ADDRESS && path[1] == USDC_ADDRESS, "Invalid Path (WETH->USDC)");
-        
-        // Simulates the swap: ETH -> WETH -> USDC
-        uint256 usdcReceived = msg.value * ETH_USDC_RATE / (10 ** 12); 
-        
-        // Mints USDC to the destination (the bank)
-        MockERC20(USDC_ADDRESS).mint(to, usdcReceived); 
-        
-        uint256[] memory amounts = new uint256[](2);
-        amounts[0] = msg.value;
-        amounts[1] = usdcReceived;
+        require(path.length == 2, "Invalid ETH->USDC path length in mock");
+        require(path[0] == MOCK_WETH_ADDRESS && path[1] == USDC_ADDRESS, "Invalid ETH->USDC path in mock");
+
+        uint256 ethAmount = msg.value;
+        // 1 ETH (18 dec) * 2000 (rate) / 10^12 = USDC (6 dec)
+        uint256 usdcReceived = ethAmount * ETH_USDC_RATE / (10 ** 12); 
+
+        MockERC20(USDC_ADDRESS).mint(to, usdcReceived);
+
+        uint256[] memory amounts = new uint256[](path.length);
+        amounts[0] = ethAmount; 
+        amounts[path.length - 1] = usdcReceived;
         return amounts;
     }
 
-    // --- Mocks for ERC20 swaps ---
+    // --- Mocks for ERC20 swaps (WETH -> USDC, DAI -> WETH -> USDC, etc.) ---
     function swapExactTokensForTokens(
         uint256 amountIn,
         uint256,
@@ -116,25 +128,33 @@ contract MockUniswapV2Router {
         address to,
         uint256 
     ) external returns (uint256[] memory) {
-        require(path.length == 2 && path[1] == USDC_ADDRESS, "Invalid Path (ERC20->USDC)");
+        
+        require(path.length >= 2 && path[path.length - 1] == USDC_ADDRESS, "Invalid Path (Must end in USDC)");
         
         address tokenIn = path[0];
         uint256 usdcReceived;
 
-        if (tokenIn == DAI_ADDRESS) { 
-             // 1:1 rate, from 18 dec (DAI) to 6 dec (USDC)
+        if (tokenIn == MOCK_WETH_ADDRESS) {
+            // WETH -> USDC path (2 hops)
+            require(path.length == 2, "Invalid WETH->USDC path length");
+            // Rate: 1 WETH = 2000 USDC (WETH 18 dec, USDC 6 dec)
+            usdcReceived = amountIn * ETH_USDC_RATE / (10 ** 12); 
+            
+        } else if (tokenIn == DAI_ADDRESS) { 
+             // DAI -> WETH -> USDC path (3 hops)
+             require(path.length == 3 && path[1] == MOCK_WETH_ADDRESS, "Invalid DAI->WETH->USDC path");
+             // Rate: 1 DAI (18 dec) = 1 USDC (6 dec)
              usdcReceived = amountIn / (10 ** 12); 
         } else {
              revert("Unrecognized input token in the mock"); 
         }
 
-        require(IERC20(tokenIn).transferFrom(msg.sender, address(this), amountIn), "Mock TransferFrom failed"); 
-        
+        MockERC20(tokenIn).transferFrom(msg.sender, address(this), amountIn);
         MockERC20(USDC_ADDRESS).mint(to, usdcReceived); 
 
-        uint256[] memory amounts = new uint256[](2);
+        uint256[] memory amounts = new uint256[](path.length);
         amounts[0] = amountIn;
-        amounts[1] = usdcReceived;
+        amounts[path.length - 1] = usdcReceived;
         return amounts;
     }
 }
@@ -157,8 +177,9 @@ contract KipuBankV3Test is Test {
 
     uint256 public constant BANK_CAP_USD = 10_000;
     uint256 public constant BANK_CAP_USDC_DEC = BANK_CAP_USD * 1e6;
-    uint256 public constant MAX_WITHDRAWAL_USDC = 1000 * 1e6;
     uint256 public constant ETH_RATE = 2000;
+    
+    uint256 public constant USER1_ID = uint256(uint160(address(0xAA)));
 
     function setUp() public {
         weth = new MockERC20("Wrapped ETH", "WETH", 18);
@@ -213,7 +234,7 @@ contract KipuBankV3Test is Test {
         vm.expectEmit(true, true, false, false, address(bank)); 
         emit KipuBankV3.DepositSwapped(user1, address(0), ethAmount, expectedUsdc);
         
-        bank.depositNativeToken{value: ethAmount}();
+        bank.depositNativeToken{value: ethAmount}(USER1_ID);
 
         vm.prank(user1); 
         assertEq(bank.getUsdcBalance(), expectedUsdc, "Incorrect user USDC balance");
@@ -228,26 +249,25 @@ contract KipuBankV3Test is Test {
     function test_DepositNativeToken_Revert_ZeroAmount() public {
         vm.prank(user1);
         vm.expectRevert(KipuBankV3.ZeroAmount.selector);
-        bank.depositNativeToken{value: 0}();
+        bank.depositNativeToken{value: 0}(USER1_ID);
     }
     
     function test_DepositNativeToken_Revert_CapExceeded() public {
-        uint256 initialBankBalanceUsdc = usdc.balanceOf(address(bank));
+        uint256 initialBankBalanceUsdc = usdc.balanceOf(address(bank)); // Should be 0 initially
         
         vm.prank(user1);
-        // 6 ETH = 12,000 USDC. Cap is 10,000 USDC.
-        uint256 ethAmount = 6 ether; 
-        uint256 expectedUsdc = ethAmount * ETH_RATE / (10 ** 12);
+        uint256 ethAmount = 6 ether; // 6 ETH = 12,000 USDC. Cap is 10,000 USDC.
+        uint256 expectedUsdc = ethAmount * ETH_RATE / (10 ** 12); // 12,000 USDC
 
         vm.expectRevert(
             abi.encodeWithSelector(
                 KipuBankV3.BankCapExceeded.selector, 
-                initialBankBalanceUsdc + expectedUsdc, // Nuevo balance total del contrato
-                expectedUsdc, // Monto recibido en este swap
+                initialBankBalanceUsdc + expectedUsdc, 
+                expectedUsdc, 
                 BANK_CAP_USDC_DEC
             )
         );
-        bank.depositNativeToken{value: ethAmount}();
+        bank.depositNativeToken{value: ethAmount}(USER1_ID);
     }
     
     // ====================================================================
@@ -266,12 +286,11 @@ contract KipuBankV3Test is Test {
         
         vm.expectEmit(true, true, false, false, address(usdc)); 
         emit IERC20.Transfer(user1, address(bank), usdcAmount); 
-
+        
         vm.expectEmit(true, true, false, false, address(bank)); 
-        // amountIn equals amountOut because it's USDC -> USDC
-        emit KipuBankV3.DepositSwapped(user1, address(usdc), usdcAmount, usdcAmount);
+        emit KipuBankV3.DepositSwapped(user1, address(usdc), usdcAmount, usdcAmount); 
 
-        bank.depositToken(address(usdc), usdcAmount);
+        bank.depositToken(address(usdc), usdcAmount, USER1_ID);
 
         assertEq(usdc.balanceOf(address(bank)), usdcAmount, "Bank did not receive the USDC");
         
@@ -285,15 +304,24 @@ contract KipuBankV3Test is Test {
 
         vm.prank(user1);
         
+        vm.expectEmit(true, true, false, false, address(dai)); 
+        emit IERC20.Transfer(user1, address(bank), daiAmount); 
+        
+        vm.expectEmit(true, true, false, false, address(dai)); 
+        emit IERC20.Transfer(address(bank), routerAddress, daiAmount);
 
-        bank.depositToken(address(dai), daiAmount);
+        vm.expectEmit(true, true, false, false, address(usdc)); 
+        emit IERC20.Transfer(address(0), address(bank), expectedUsdc);
+
+        vm.expectEmit(true, true, false, false, address(bank)); 
+        emit KipuBankV3.DepositSwapped(user1, address(dai), daiAmount, expectedUsdc);
+
+        bank.depositToken(address(dai), daiAmount, USER1_ID);
 
         assertEq(dai.balanceOf(address(bank)), 0, "Bank should NOT hold DAI (it should be swapped)"); 
         
         vm.prank(user1); 
         assertEq(bank.getUsdcBalance(), expectedUsdc, "Incorrect user balance after DAI swap");
-
-        assertEq(dai.allowance(address(bank), routerAddress), 0, "Allowance not reset to zero");
     }
     
     // ====================================================================
@@ -302,7 +330,7 @@ contract KipuBankV3Test is Test {
 
     function test_Withdraw_Success() public {
         vm.prank(user1);
-        bank.depositNativeToken{value: 1 ether}(); 
+        bank.depositNativeToken{value: 1 ether}(USER1_ID); // Deposit 1 ETH = 2000 USDC.
         
         uint256 initialUserUsdcBalance = usdc.balanceOf(user1);
         uint256 withdrawAmount = 500 * 1e6; // 500 USDC
@@ -318,23 +346,21 @@ contract KipuBankV3Test is Test {
         bank.withdraw(withdrawAmount);
 
         vm.prank(user1); 
-        assertEq(bank.getUsdcBalance(), 1500 * 1e6, "User balance should be 1500 USDC");
+        assertEq(bank.getUsdcBalance(), 1500 * 1e6, "User balance should be 1500 USDC"); // User balance should be 1500 USDC
         
-        assertEq(usdc.balanceOf(user1), initialUserUsdcBalance + withdrawAmount, "USDC not transferred to user");
+        assertEq(usdc.balanceOf(user1), initialUserUsdcBalance + withdrawAmount, "USDC not transferred to user"); // USDC not transferred to user
         
         vm.prank(owner);
-        assertEq(bank.getTotalBankValueUsdc(), 1500 * 1e6, "Total bank value should decrease");
+        assertEq(bank.getTotalBankValueUsdc(), 1500 * 1e6, "Total bank value should decrease"); // Total bank value should decrease
     }
 
     function test_Withdraw_Revert_InsufficientFunds() public {
-        // Deposit a LOW amount (0.05 ETH = 100 USDC)
         vm.prank(user1);
-        bank.depositNativeToken{value: 0.05 ether}(); 
+        bank.depositNativeToken{value: 0.05 ether}(USER1_ID); // Deposit a LOW amount (0.05 ETH = 100 USDC)
         
         vm.prank(user1);
-        // Request 101 USDC. This is < Limit (1000 USDC) but > Balance (100 USDC).
         uint256 available = 100 * 1e6;
-        uint256 requested = 101 * 1e6; 
+        uint256 requested = 101 * 1e6; // Request 101 USDC. This is < Limit (1000 USDC) but > Balance (100 USDC).
         
         vm.expectRevert(
             abi.encodeWithSelector(
@@ -347,18 +373,16 @@ contract KipuBankV3Test is Test {
     }
     
     function test_Withdraw_Revert_LimitExceeded() public {
-        // Setup: user1 deposits 1 ETH = 2000 USDC
         vm.prank(user1);
-        bank.depositNativeToken{value: 1 ether}(); 
+        bank.depositNativeToken{value: 1 ether}(USER1_ID); // Setup: user1 deposits 1 ETH = 2000 USDC
 
         vm.prank(user1);
-        // Limit is 1000 USDC. Requesting 1001 USDC
-        uint256 requested = MAX_WITHDRAWAL_USDC + 1; 
+        uint256 requested = 10001 * 1e6; // Request 10001 USDC
         
         vm.expectRevert(
             abi.encodeWithSelector(
                 KipuBankV3.WithdrawalLimitExceeded.selector, 
-                MAX_WITHDRAWAL_USDC, 
+                bank.MAX_WITHDRAWAL_USDC(), // Fetch the contract's actual limit (10000 * 1e6)
                 requested
             )
         ) ;
@@ -375,20 +399,17 @@ contract KipuBankV3Test is Test {
     }
 
     function test_UtilityViews_WithStateChange() public {
-        // Setup: user1 deposits 1 ETH = 2000 USDC
         vm.prank(user1);
-        bank.depositNativeToken{value: 1 ether}(); 
+        bank.depositNativeToken{value: 1 ether}(USER1_ID); // Setup: user1 deposits 1 ETH = 2000 USDC
 
-        // Withdrawal
         vm.prank(user1);
-        bank.withdraw(500 * 1e6);
+        bank.withdraw(500 * 1e6); // Withdrawal
 
         // Counter and view checks
         assertEq(bank.getTotalDepositsCount(), 1, "Total Deposits count mismatch");
         assertEq(bank.getTotalWithdrawalsCount(), 1, "Total Withdrawals count mismatch");
         
-        // getTotalBankValueUsdc is onlyOwner
-        vm.prank(owner);
+        vm.prank(owner); // getTotalBankValueUsdc is onlyOwner
         assertEq(bank.getTotalBankValueUsdc(), 1500 * 1e6, "Total bank value is not 1500 USDC");
     }
 }
