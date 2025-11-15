@@ -1,4 +1,4 @@
-# README: KipuBank V3 - An Architectural Upgrade
+# KipuBank V3 - An Architectural Upgrade
 
 Welcome to the source code for KipuBank, now in its version 3!
 
