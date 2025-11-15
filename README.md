@@ -48,3 +48,73 @@ forge script script/DeployKipuBankV3.s.sol:DeployKipuBankV3 \
   --etherscan-api-key $ETHERSCAN_KEY \
   --chain-id 11155111 \
   --private-key $PRIVATE_KEY
+```
+
+## 3. ⚙️ Key Interaction Functions
+
+### Deposit Native ETH (Swaps to USDC):
+
+```
+// ETH sent as value is swapped for USDC, added to the user's internal balance.
+function depositNativeToken(uint256 minUsdcOut) public payable; 
+```
+
+B. Deposit ERC20 (Direct or Swap):
+
+```
+// If tokenIn is USDC, it is deposited directly. If not (e.g., USDT), it is swapped to USDC.
+function depositToken(address tokenIn, uint256 amountIn, uint256 minUsdcOut) public;
+```
+
+Note: The user must call approve(KipuBankV3, amount) on the tokenIn address before calling this function.
+
+C. Withdraw USDC:
+
+```
+// Transfers the requested amount of USDC from the bank reserve to the user.
+function withdraw(uint256 amountUsdc) public;
+```
+
+## 4. 🎨 Design Decisions and Trade-offs
+
+### Trade-off (Risk/Inefficiency)
+
+1. **Single-Asset Reserve (USDC)**
+
+**Concentration Risk:** All protocol liquidity is held in a single asset. While simple for accounting, a major failure (e.g., depeg or censorship) of USDC would directly impact the entire bank's solvency and all user funds.
+
+2. **Permissioned Ownership (Ownable)**
+
+**Centralization:** The contract uses the simple Ownable pattern. The owner retains the power to adjust the bankCap (if implemented) or update associated addresses (routers), requiring users to place significant trust in the governance of the owner key.
+
+3. **No Yield Generation**
+
+**Capital Inefficiency:** The bank's reserves sit idle. While safer than exposing funds to complex DeFi protocols, it generates no yield for depositors, potentially making the bank less competitive than yield-generating vaults.
+
+## 5. 🔎 Threat Analysis Report
+
+A. Protocol Weaknesses and Missing Steps for Maturity
+
+The KipuBank V3 achieves basic functionality with a major risk mitigation layer (the Cap), but it still lacks features typical of a mature DeFi protocol:
+
+
+1. No Emergency Pause/Halt
+
+Implement Emergency Governance: Add a Pausable module (e.g., from OpenZeppelin) controlled by a multi-sig or governance DAO. This is essential to halt deposits/withdrawals immediately upon discovery of a critical bug or external market failure (e.g., USDC depeg).
+
+2. No Fee/Sustainability Model
+
+Introduce Fee Structure: The current protocol is unsustainable. Implement a small withdrawal fee or a performance fee on reserves to cover gas costs, fund audits, and reward governance.
+
+3. Withdrawal Limits
+
+Per-User Withdrawal Limits: Add a per-user or time-based withdrawal limit (e.g., maximum 10k USDC per day) to prevent a sudden bank run from draining the available liquidity quickly.
+
+4. No External Audit
+
+Full Audit: A comprehensive audit by a reputable third-party security firm is mandatory before production deployment.
+
+
+## 6. 🧪 Coverage
+
+![Alt text](/coverage.png)
