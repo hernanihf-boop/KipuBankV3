@@ -11,7 +11,7 @@ import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 using SafeERC20 for IERC20;
 
 // ====================================================================
-// TEST SUITE: KipuBankV3 (FORKUNG SEPOLIA)
+// TEST SUITE: KipuBankV3 (FORKING SEPOLIA)
 // ====================================================================
 
 contract KipuBankV3Test is Test {
