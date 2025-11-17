@@ -173,7 +173,7 @@ contract KipuBankV3 is ReentrancyGuard, Ownable {
         uint256 currentTotalUsdc = IERC20(USDC_ADDRESS).balanceOf(address(this));
         uint256 maxCap = BANK_CAP_USDC;
         
-        if (currentTotalUsdc + usdcReceived > maxCap) {
+        if (currentTotalUsdc > maxCap) {
             revert BankCapExceeded(currentTotalUsdc, usdcReceived, maxCap);
         }
         
